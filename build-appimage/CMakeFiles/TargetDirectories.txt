@@ -1,8 +1,0 @@
-/src/build-appimage/CMakeFiles/mayflower.dir
-/src/build-appimage/CMakeFiles/edit_cache.dir
-/src/build-appimage/CMakeFiles/rebuild_cache.dir
-/src/build-appimage/CMakeFiles/list_install_components.dir
-/src/build-appimage/CMakeFiles/install.dir
-/src/build-appimage/CMakeFiles/install/local.dir
-/src/build-appimage/CMakeFiles/install/strip.dir
-/src/build-appimage/CMakeFiles/mayflower_autogen.dir
