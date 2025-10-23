@@ -40,6 +40,12 @@
 #include <QTimer>
 #include <QDesktopServices>
 #include <QScrollArea>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QPushButton>
+#include <QUrl>
+#include <QMovie>
+#include <QSettings>
 
 namespace {
 
@@ -283,6 +289,45 @@ private:
     bool m_doInstall = false;
 };
 
+// Smoothly scales a base pixmap to the label's current size, keeping aspect ratio
+class SmoothScalingLabel : public QLabel {
+    Q_OBJECT  // <-- add this
+public:
+    using QLabel::QLabel;
+
+    void setBasePixmap(const QPixmap &pm) {
+        base_ = pm;
+        applyScale();
+    }
+
+protected:
+    void resizeEvent(QResizeEvent *e) override {
+        QLabel::resizeEvent(e);
+        applyScale();
+    }
+
+private:
+    QPixmap base_;
+
+    void applyScale() {
+        if (base_.isNull()) return;
+
+        const qreal dpr = devicePixelRatioF();
+        const QSize targetPx = size() * dpr;  // Qt6: QSize * qreal -> QSize
+        if (targetPx.isEmpty()) return;
+
+        QPixmap scaled = base_.scaled(
+            targetPx,
+            Qt::KeepAspectRatio,
+            Qt::SmoothTransformation
+        );
+        scaled.setDevicePixelRatio(dpr);
+        setPixmap(scaled);
+    }
+};
+
+
+
 // ============================== MainWindow impl ==============================
 
 MainWindow::MainWindow(QWidget *parent)
@@ -290,18 +335,84 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+
+    ensureGlobalIndicatorStyle();
+    loadDefaultOutDirIntoUi();
+
+    // --- Placeholder overlay inside the existing log (QPlainTextEdit) ---
+    if (ui->textLog) {
+        // Create (or reuse) a centered QLabel sitting on the textLog's viewport.
+        QLabel *phBase = ui->textLog->viewport()->findChild<QLabel*>("logPlaceholder");
+    SmoothScalingLabel *ph = phBase ? dynamic_cast<SmoothScalingLabel*>(phBase) : nullptr;
+    if (!ph) {
+        // not found, create one
+        ph = new SmoothScalingLabel(ui->textLog->viewport());
+        ph->setObjectName("logPlaceholder");
+        ph->setAlignment(Qt::AlignCenter);
+        ph->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        ph->setStyleSheet("QLabel { color: #888; font-size: 13px; }");
+        ph->setScaledContents(false);
+        ph->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+
+        QPixmap pm(":/icons/appicon.png");
+        if (!pm.isNull()) ph->setBasePixmap(pm);
+        else ph->setText(tr("Log output will appear here"));
+    }
+
+        // Size to fill the viewport so the pixmap/text stays centered.
+        ph->setGeometry(ui->textLog->viewport()->rect());
+
+        // Keep it full-viewport on resize.
+        ui->textLog->viewport()->installEventFilter(
+            new ResizeUpdateFilter([logView = ui->textLog, ph]() {
+                if (!logView || !ph) return;
+                ph->setGeometry(logView->viewport()->rect());
+            }, ui->textLog->viewport())
+        );
+
+        // Show placeholder only while the document is empty.
+        auto refreshPlaceholder = [this]() {
+            if (!ui || !ui->textLog) return;
+            if (auto ph = ui->textLog->viewport()->findChild<QLabel*>("logPlaceholder")) {
+                ph->setVisible(ui->textLog->document() ? ui->textLog->document()->isEmpty() : true);
+            }
+        };
+
+        // React to content changes (covers .clear() and text edits)
+        connect(ui->textLog->document(), &QTextDocument::contentsChanged,
+                this, refreshPlaceholder);
+
+        // Initial state
+        refreshPlaceholder();
+    }
+
+    // (Optional) If you also added a dedicated QLabel named logLabel in the UI,
+    // you can keep or remove that block. The overlay above makes it unnecessary.
 }
+
 
 MainWindow::~MainWindow()
 {
     delete ui;
 }
 
+// --- Add this method to mainwindow.cpp ---
+void MainWindow::ensureGlobalIndicatorStyle()
+{
+    // Clear any per-widget styles that might override the app stylesheet
+    // (Only touches QCheckBox/QRadioButton descendants of this window)
+    const auto checkboxes = this->findChildren<QCheckBox *>();
+    for (QCheckBox *cb : checkboxes) {
+        if (!cb->styleSheet().isEmpty())
+            cb->setStyleSheet(QString());
+    }
+}
+
+
 QFileDialog* MainWindow::createFileDialogWithImagePreview(const QString& title,
                                                           const QString& startDir,
                                                           const QStringList& nameFilters)
 {
-    // Non-native so we can access inner views/layout.
     auto *dlg = new QFileDialog(this, title, startDir);
     dlg->setOption(QFileDialog::DontUseNativeDialog, true);
     dlg->setFileMode(QFileDialog::ExistingFile);
@@ -311,9 +422,7 @@ QFileDialog* MainWindow::createFileDialogWithImagePreview(const QString& title,
     // Setup double-click enforcement
     setupFileDialogForDoubleClick(dlg);
 
-    ensureSingleClickSelectOnly(dlg);
-
-    // ---- Build right-side preview panel
+    // Build right-side preview panel
     auto *previewPane = new QWidget(dlg);
     auto *v = new QVBoxLayout(previewPane);
     v->setContentsMargins(8,8,8,8);
@@ -324,17 +433,18 @@ QFileDialog* MainWindow::createFileDialogWithImagePreview(const QString& title,
     imgLabel->setMinimumSize(260, 180);
     imgLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     imgLabel->setStyleSheet("QLabel { border: 1px solid #555; background: #111; }");
+    imgLabel->setScaledContents(false);  // We'll handle scaling ourselves
 
     auto *metaLabel = new QLabel(previewPane);
     metaLabel->setWordWrap(true);
     metaLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     metaLabel->setStyleSheet("QLabel { color: #bbb; }");
 
-    v->addWidget(imgLabel, /*stretch*/1);
-    v->addWidget(metaLabel, /*stretch*/0);
+    v->addWidget(imgLabel, 1);
+    v->addWidget(metaLabel, 0);
     previewPane->setLayout(v);
 
-    // Insert panel into QFileDialog's grid layout (right-most column).
+    // Insert panel into QFileDialog's grid layout
     if (auto *gl = qobject_cast<QGridLayout*>(dlg->layout())) {
         int rows = gl->rowCount();
         int col  = gl->columnCount();
@@ -344,11 +454,22 @@ QFileDialog* MainWindow::createFileDialogWithImagePreview(const QString& title,
         dlg->layout()->addWidget(previewPane);
     }
 
-    // ---- Live preview state & update logic
+    // Shared state for preview
     auto currentImage = std::make_shared<QImage>();
     auto currentPath  = std::make_shared<QString>();
+    auto currentMovie = std::make_shared<QPointer<QMovie>>();
 
-    auto render = [=]() {
+    // Helper to stop any running animation
+    auto stopAnimation = [currentMovie]() {
+        if (*currentMovie) {
+            (*currentMovie)->stop();
+            (*currentMovie)->deleteLater();
+            *currentMovie = nullptr;
+        }
+    };
+
+    // Render function for static images
+    auto renderStatic = [=]() {
         if (currentImage->isNull()) {
             imgLabel->setPixmap(QPixmap());
             metaLabel->setText("No preview");
@@ -363,29 +484,105 @@ QFileDialog* MainWindow::createFileDialogWithImagePreview(const QString& title,
         metaLabel->setText(info);
     };
 
-    // Update image when the selection changes
+    // Helper to check if file is animated
+    auto isAnimatedFormat = [](const QString& path) -> bool {
+        const QString lower = path.toLower();
+        return lower.endsWith(".gif") ||
+               lower.endsWith(".webp") ||
+               lower.endsWith(".apng");
+    };
+
+    // Update preview when selection changes
     QObject::connect(dlg, &QFileDialog::currentChanged, dlg, [=](const QString& path){
         *currentPath = path;
-        QImageReader r(path);
-        r.setAutoTransform(true);
-        // Accept common stensureSingleClickSelectOnly(dlg);atic images and GIF/WebP/PNG first frame
-        const bool isFile = QFileInfo(path).isFile();
-        if (!isFile || !r.canRead()) {
+        stopAnimation();  // Stop any previous animation
+
+        QFileInfo fi(path);
+        if (!fi.exists() || !fi.isFile()) {
             *currentImage = QImage();
-            render();
+            renderStatic();
             return;
         }
-        QImage img = r.read();         // reads first frame only; safe
+
+        // Try to play as animation first if it's an animated format
+        if (isAnimatedFormat(path)) {
+            auto* movie = new QMovie(path, QByteArray(), dlg);
+
+            if (movie->isValid() && movie->frameCount() > 1) {
+                // It's a valid animation with multiple frames
+                *currentMovie = movie;
+
+                // Scale the movie to fit the label
+                QSize originalSize = movie->scaledSize();
+                if (originalSize.isEmpty()) {
+                    originalSize = movie->currentPixmap().size();
+                }
+
+                // Calculate scaled size maintaining aspect ratio
+                QSize labelSize = imgLabel->size();
+                QSize scaledSize = originalSize.scaled(labelSize, Qt::KeepAspectRatio);
+                movie->setScaledSize(scaledSize);
+
+                imgLabel->setMovie(movie);
+                movie->start();
+
+                // Update metadata
+                const QString info = QString("%1\n%2 × %3  •  %4 KB\n%5 frames")
+                                        .arg(fi.fileName())
+                                        .arg(originalSize.width())
+                                        .arg(originalSize.height())
+                                        .arg(qMax<qint64>(1, fi.size() / 1024))
+                                        .arg(movie->frameCount());
+                metaLabel->setText(info);
+                return;
+            } else {
+                // Not a valid multi-frame animation, clean up
+                movie->deleteLater();
+            }
+        }
+
+        // Fall back to static image preview
+        QImageReader r(path);
+        r.setAutoTransform(true);
+        if (!r.canRead()) {
+            *currentImage = QImage();
+            renderStatic();
+            return;
+        }
+
+        QImage img = r.read();
         *currentImage = img;
-        render();
+        renderStatic();
     });
 
-    // Re-render on preview resize to keep crisp scaling
-    previewPane->installEventFilter(new ResizeUpdateFilter(render, previewPane));
-    imgLabel->installEventFilter(new ResizeUpdateFilter(render, imgLabel));
+    // Re-render on resize to keep crisp scaling
+    auto resizeHandler = [=]() {
+        if (*currentMovie) {
+            // Rescale the animated movie
+            QSize originalSize = (*currentMovie)->scaledSize();
+            if (originalSize.isEmpty()) {
+                originalSize = (*currentMovie)->currentPixmap().size();
+            }
+            QSize labelSize = imgLabel->size();
+            QSize scaledSize = originalSize.scaled(labelSize, Qt::KeepAspectRatio);
+            (*currentMovie)->setScaledSize(scaledSize);
+        } else {
+            // Rescale static image
+            renderStatic();
+        }
+    };
+
+    previewPane->installEventFilter(new ResizeUpdateFilter(resizeHandler, previewPane));
+    imgLabel->installEventFilter(new ResizeUpdateFilter(resizeHandler, imgLabel));
+
+    // Clean up when dialog is destroyed
+    QObject::connect(dlg, &QObject::destroyed, [stopAnimation]() {
+        stopAnimation();
+    });
 
     return dlg;
 }
+
 
 // NEW: Modal popup that shows the freshly created preview.png.
 // - Scales to fit window but preserves aspect ratio.
@@ -1442,14 +1639,86 @@ void MainWindow::on_btnSelectAnim_clicked()
 
 void MainWindow::on_btnSelectOutDir_clicked()
 {
-    const QString dir = QFileDialog::getExistingDirectory(
-        this, "Select Output Folder", QString(),
-        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
-    if (!dir.isEmpty()) {
-        if (ui->lineOutDir) ui->lineOutDir->setText(dir);
-        appendLog("Output directory selected: " + dir);
+    // Figure out where to start the dialog:
+    QString startDir;
+    if (ui->lineOutDir && !ui->lineOutDir->text().trimmed().isEmpty()) {
+        startDir = ui->lineOutDir->text().trimmed();
+    } else {
+        startDir = loadDefaultOutDir();
+        if (startDir.isEmpty()) startDir = QDir::homePath();
+    }
+
+    // Build a directory-only picker dialog (non-native so we can insert our checkbox)
+    QFileDialog dlg(this, tr("Select Output Folder"), startDir);
+    dlg.setFileMode(QFileDialog::Directory);
+    dlg.setOption(QFileDialog::ShowDirsOnly, true);
+    dlg.setOption(QFileDialog::DontUseNativeDialog, true);
+    dlg.setAcceptMode(QFileDialog::AcceptOpen);
+
+    // "Save as default location" checkbox
+    QCheckBox *saveAsDefault = new QCheckBox(tr("Save as default location"), &dlg);
+    saveAsDefault->setChecked(false);
+
+    // Add the checkbox to the bottom of the dialog safely
+    if (QGridLayout *grid = dlg.findChild<QGridLayout*>()) {
+        grid->addWidget(saveAsDefault, grid->rowCount(), 0, 1, grid->columnCount());
+    } else if (QLayout *lay = dlg.layout()) {
+        // Fallback: attach below existing layout
+        QVBoxLayout *wrap = new QVBoxLayout;
+        QWidget *container = new QWidget(&dlg);
+        container->setLayout(wrap);
+        // Move original layout into a container row
+        // (If the toolkit layout is not easily movable, just append the checkbox)
+        lay->addWidget(saveAsDefault);
+    }
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    const QStringList sel = dlg.selectedFiles();
+    if (sel.isEmpty())
+        return;
+
+    const QString chosen = sel.first();
+    if (chosen.isEmpty())
+        return;
+
+    // Put selection into the UI
+    if (ui->lineOutDir)
+        ui->lineOutDir->setText(chosen);
+
+    // Persist as default if requested
+    if (saveAsDefault->isChecked())
+        saveDefaultOutDir(chosen);
+
+    // Optional: log / validate if you have helpers for that
+    // appendLog("Output folder selected: " + chosen);
+    // validateSelectedFilesNonFatal();
+}
+QString MainWindow::loadDefaultOutDir() const
+{
+    // Uses app/organization from QCoreApplication if set in main.cpp; otherwise still works.
+    QSettings s;
+    return s.value(QStringLiteral("paths/defaultOutDir")).toString();
+}
+
+void MainWindow::saveDefaultOutDir(const QString &dir)
+{
+    if (dir.isEmpty())
+        return;
+    QSettings s;
+    s.setValue(QStringLiteral("paths/defaultOutDir"), dir);
+    s.sync();
+}
+
+void MainWindow::loadDefaultOutDirIntoUi()
+{
+    const QString def = loadDefaultOutDir();
+    if (!def.isEmpty() && ui->lineOutDir && ui->lineOutDir->text().trimmed().isEmpty()) {
+        ui->lineOutDir->setText(def);
     }
 }
+
 
 void MainWindow::validateSelectedFilesNonFatal()
 {

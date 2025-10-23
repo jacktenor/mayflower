@@ -70,3 +70,10 @@ install(TARGETS mayflower
 if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(mayflower)
 endif()
+find_package(Qt6 REQUIRED COMPONENTS Widgets Gui)
+
+target_link_libraries(mayflower
+    PRIVATE
+      Qt6::Widgets
+      Qt6::Gui
+)

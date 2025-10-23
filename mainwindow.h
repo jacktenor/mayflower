@@ -28,6 +28,8 @@ public:
                                            const QString &animGifPath,
                                            QString *errOut);
 
+void ensureGlobalIndicatorStyle();
+
     // ---- Background-safe wrappers (call your existing originals under the hood) ----
     // Returns themeDir on success; empty string on failure (and *err set).
     QString generateThemeFilesBg(const QString &themeName,
@@ -108,7 +110,9 @@ private slots:
 
 private:
     Ui::MainWindow *ui;
-
+    QString loadDefaultOutDir() const;
+    void saveDefaultOutDir(const QString &dir);
+    void loadDefaultOutDirIntoUi();
 
     // ---- (Optional) helper declarations used by your generator/installer ----
     // If your project already declares these elsewhere, you can delete these lines.
